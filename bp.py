@@ -1,56 +1,19 @@
-
-# # get max address of device
-# from bleak import BleakScanner
-# import asyncio
-#
-# async def scan():
-#     devices = await BleakScanner.discover(10)
-#     for d in devices:
-#         print(d)
-#
-# asyncio.run(scan())
-#
-
-# # connect with max address
-# import asyncio
-# from bleak import BleakClient
-#
-# ADDRESS = "18:7A:93:12:26:AE"  #ROSSMAX X3 BT MAX ADDRESS
-#
-# async def test_connect():
-#     async with BleakClient(ADDRESS) as client:
-#         print("✅ Connected:", client.is_connected)
-#
-# asyncio.run(test_connect())
-#
-
-
-#GET  Characteristics OF UUID
-#
-# import asyncio
-# from bleak import BleakClient
-#
-# ADDRESS = "18:7A:93:12:26:AE"
-#
-# async def list_services():
-#     async with BleakClient(ADDRESS) as client:
-#         for service in client.services:
-#             print(service.uuid, service.description)
-#             for char in service.characteristics:
-#                 print("   ", char.uuid, char.properties)
-#
-# asyncio.run(list_services())
-
-
 import asyncio
 from bleak import BleakClient, BleakScanner
+from datetime import datetime
 
-ADDRESS = "18:7A:93:12:26:AE"
-BP_MEASUREMENT = "00002a35-0000-1000-8000-00805f9b34fb"
+# =========================
+# DEVICE INFO
+# =========================
+ADDRESS = "18:7A:93:12:26:AE"   # Rossmax X3 BT
+BP_MEASUREMENT_UUID = "00002a35-0000-1000-8000-00805f9b34fb"
 
-readings = []
+readings = []   # (time, sys, dia, map, pulse)
 
 
+# =========================
+# BP DATA DECODER
+# =========================
 def decode_bp(data: bytearray):
     flags = data[0]
 
@@ -69,71 +32,108 @@ def decode_bp(data: bytearray):
     return systolic, diastolic, mean_art, pulse
 
 
+# =========================
+# NOTIFICATION HANDLER
+# =========================
 def handle_bp(sender, data):
     sys, dia, map_, pulse = decode_bp(data)
 
     if map_ == 0:
         map_ = round(dia + (sys - dia) / 3, 1)
 
-    readings.append((sys, dia, map_, pulse))
-    print(f"🩺 READING → SYS:{sys} DIA:{dia} MAP:{map_} Pulse:{pulse}")
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    readings.append((timestamp, sys, dia, map_, pulse))
+    print(f"🩺 [{timestamp}] SYS:{sys} DIA:{dia} MAP:{map_} Pulse:{pulse}")
 
 
-async def wait_for_device():
-    print("🔍 Waiting for device to wake up...")
-    while True:
-        devices = await BleakScanner.discover(timeout=5)
-        for d in devices:
-            if d.address == ADDRESS:
-                print("✅ Device detected")
-                return
-        await asyncio.sleep(2)
+# =========================
+# FAST CONNECT (NO LONG SCAN)
+# =========================
+async def fast_connect():
+    try:
+        client = BleakClient(ADDRESS, timeout=10)
+        await client.connect()
+        if client.is_connected:
+            print("⚡ Fast connected (no scan)")
+            return client
+    except:
+        pass
+    return None
 
+
+# =========================
+# SHORT SCAN (BACKUP)
+# =========================
+async def scan_and_connect():
+    print("🔍 Short scan...")
+    devices = await BleakScanner.discover(timeout=3)
+    for d in devices:
+        if d.address == ADDRESS:
+            client = BleakClient(ADDRESS, timeout=10)
+            await client.connect()
+            if client.is_connected:
+                print("✅ Connected after scan")
+                return client
+    return None
+
+
+# =========================
+# CONNECT & READ ONCE
+# =========================
 async def connect_and_read():
-    await wait_for_device()
+    client = await fast_connect()
+    if not client:
+        client = await scan_and_connect()
 
-    async with BleakClient(ADDRESS) as client:
-        print("🔗 Connected to Rossmax — press BP button on device")
+    if not client:
+        print("❌ Device not found")
+        return False
 
-        # Retry notify until it works
-        for attempt in range(5):
-            try:
-                await client.start_notify(BP_MEASUREMENT, handle_bp)
+    try:
+        print("🔗 Press BP button on device")
+
+        await client.start_notify(BP_MEASUREMENT_UUID, handle_bp)
+
+        start_len = len(readings)
+        timeout = 50
+
+        for _ in range(timeout):
+            if len(readings) > start_len:
                 break
-            except OSError:
-                print(f"⚠️ Notify start failed, retrying... ({attempt+1}/5)")
-                await asyncio.sleep(2)
-        else:
-            print("❌ Failed to start notify. Skipping this reading.")
-            return
+            await asyncio.sleep(1)
 
-        # Wait until first reading is actually received
-        reading_received = False
-        while not reading_received:
-            if len(readings) > 0 and readings[-1][0] is not None:
-                reading_received = True
-            else:
-                print("⏳ Waiting for user to press BP button on device...")
-                await asyncio.sleep(1)
+        await client.stop_notify(BP_MEASUREMENT_UUID)
+        await client.disconnect()
 
-        await client.stop_notify(BP_MEASUREMENT)
-        print("🔌 Reading captured and connection closed\n")
+        print("🔌 Reading done & disconnected\n")
+        return True
+
+    except Exception as e:
+        print("❌ Error:", e)
+        try:
+            await client.disconnect()
+        except:
+            pass
+        return False
 
 
+# =========================
+# MAIN LOOP
+# =========================
 async def main():
-    total_readings = int(input("How many readings do you want to take? "))
+    total = int(input("📌 How many readings? "))
 
-    for i in range(total_readings):
-        input(f"\n👉 Please TURN ON the device and press ENTER to connect for reading {i+1}...")
-
+    for i in range(total):
+        input(f"\n👉 Turn ON device & press ENTER for reading {i+1}...")
         await connect_and_read()
 
-        if i < total_readings - 1:
-            input("⚠️ Device may sleep. Turn it OFF and then ON again. Press ENTER when ready for next reading...")
+        if i < total - 1:
+            input("⚠️ Turn device OFF & ON again, press ENTER...")
 
     print("\n📊 FINAL RESULTS")
     for i, r in enumerate(readings, 1):
-        print(f"Reading {i}: SYS={r[0]} DIA={r[1]} MAP={r[2]} Pulse={r[3]}")
+        print(f"{i}. [{r[0]}] SYS={r[1]} DIA={r[2]} MAP={r[3]} Pulse={r[4]}")
 
 
 asyncio.run(main())
