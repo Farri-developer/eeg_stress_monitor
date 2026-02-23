@@ -1838,6 +1838,8 @@ if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
     app.setStyle('Fusion')
 
+
+
     # Dark theme
     palette = QtGui.QPalette()
     palette.setColor(QtGui.QPalette.Window, QtGui.QColor(30, 30, 30))
